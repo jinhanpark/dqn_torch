@@ -1,7 +1,7 @@
 import numpy as np
 
+import os
 import random
-
 import time
 
 import torch
@@ -12,6 +12,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 from .replay_memory import ReplayMemory
 from .short_term_memory import ShortTermMemory
+from .summarizer import Summarizer
 
 from .utils import makedir_if_there_is_no
 
@@ -23,26 +24,30 @@ class Trainer:
     def __init__(self, config, env, agent):
         self.config = config
         self.env = env
+        self.model = agent.model
         self.agent = agent
         self.memory = ReplayMemory(config)
         self.short_term = ShortTermMemory(config)
 
         self.loss = F.smooth_l1_loss
-        self.optim = optim.RMSprop(self.agent.q_net.parameters(), lr=config.lr)
+        self.optim = optim.RMSprop(self.model.parameters(), lr=config.lr)
+        
+        self.summarizer = Summarizer()
 
     def train(self):
+        if not self.config.load_ckpt or not self.load():
+            self.saved_step = 0
 
         screen, action, reward, done = self.env.start_randomly()
 
         for _ in range(self.config.history_length):
             self.short_term.add(screen)
-
-        start_step = 0
-        for self.step in tqdm(range(start_step, self.config.max_step),
+        
+        for self.step in tqdm(range(self.saved_step, self.config.max_step),
                               ncols=70,
                               total=self.config.max_step,
-                              initial=start_step):
-            if self.step == start_step or self.step == self.config.replay_start_size:
+                              initial=self.saved_step):
+            if self.step == self.saved_step or self.step == self.config.replay_start_size:
                 self.update_cnt = 0
                 ep_reward = 0.
                 total_reward = 0.
@@ -77,14 +82,18 @@ class Trainer:
                 except:
                     max_ep_reward = 0
                     avg_ep_reward = 0
-
-                print(
-                    "\navg_r: {:.4f}, avg_l: {:.6f}, avg_q: {:3.6f}, avg_ep_r: {:.4f}, max_ep_r: {:.4f}"
-                    .format(avg_reward, avg_loss, avg_q, avg_ep_reward,
-                            max_ep_reward))
+                    
+                summary_dict = {'Loss/avg_loss' : avg_loss,
+                                'Reward/avg_reward' : avg_reward,
+                                'Reward/avg_episode_reward' : avg_ep_reward,
+                                'Reward/max_episode_reward' : max_ep_reward,
+                                'Q/avg_q' : avg_q}
+                
+                self.summarizer.summarize_scalars(summary_dict, self.step)
 
                 if max_avg_record * 0.9 <= avg_ep_reward:
                     max_avg_record = max(max_avg_record, avg_ep_reward)
+                    self.save()
 
                 self.update_cnt = 0
                 ep_reward = 0.
@@ -116,7 +125,7 @@ class Trainer:
         A = A.to(torch.long)
         NS = NS.to(torch.float)
 
-        Q = self.agent.q_net(S).gather(1, A)
+        Q = self.agent.model(S).gather(1, A)
 
         next_state_values = torch.zeros(self.config.batch_size, device=device)
         next_state_values = self.agent.fixed_net(NS).max(1)[0].detach()
@@ -127,7 +136,7 @@ class Trainer:
 
         self.optim.zero_grad()
         loss.backward()
-        for param in self.agent.q_net.parameters():
+        for param in self.agent.model.parameters():
             param.grad.data.clamp_(-1, 1)
         self.optim.step()
 
@@ -147,7 +156,6 @@ class Trainer:
             if self.step % self.config.fixed_net_update_frequency == 0:
                 self.agent.update_fixed_target()
             # TODO: rl decaying
-            # TODO: model saving
 
     def play(self, test=False):
         try:
@@ -183,3 +191,31 @@ class Trainer:
 
         print("Evaluation Done.\n mean reward: {}, max reward: {}".format(
             np.mean(ep_rewards), np.max(ep_rewards)))
+
+    def save(self):
+        if not os.path.exists('./save'):
+            os.mkdir('./save')
+        torch.save({'step' : self.step,
+                    'model_state_dict' : self.model.state_dict(),
+                    'optimizer_state_dict' : self.optim.state_dict(),
+                    'loss' : self.loss},
+                    f'./save/ckpt_{self.step}.pth')
+        with open('./save/ckpt_info.txt', 'w') as f:
+            f.write(f'{self.step}')
+            
+    def load(self):
+        if not self.config.load_ckpt or not os.path.exists('./save/ckpt_info.txt'):
+            return 0
+        
+        ckpt_to_load = 0
+        with open('./save/ckpt_info.txt', 'r') as f:
+            ckpt_to_load = int(f.readline().strip())
+        print(ckpt_to_load)
+        
+        ckpt = torch.load(f'./save/ckpt_{ckpt_to_load}.pt')
+        self.model.load_state_dict(ckpt['model_state_dict'])
+        self.optim.load_state_dict(ckpt['optimzer_state_dict'])
+        self.saved_step = ckpt['step']
+        self.loss = ckpt['loss']
+        
+        return 1
