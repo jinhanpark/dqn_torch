@@ -13,6 +13,7 @@ class Environment:
 
     def __init__(self, config):
         self.make()
+        self.config = config
 
     def initialize_game(self):
         self._state = self.env.reset()
@@ -39,7 +40,8 @@ class Environment:
         return np.expand_dims(self._state, axis=0)
 
     def render(self):
-        self.env.render()
+        if self.config.render:
+            self.env.render()
 
     def after_act(self):
         self.render()

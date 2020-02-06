@@ -62,4 +62,4 @@ class Config(MemoryConfig, ModelConfig, EnvironmentConfig, TrainConfig):
     load_ckpt = 1
     test = 0
     train = 1
-    render = 1
+    render = 0
